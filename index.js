@@ -1,14 +1,13 @@
 // ==========================
 //  Cloudflare Worker 后端
-//  接收 Bug 报告，提供可视化面板，支持删除（密码验证）
-//  依赖 D1 数据库绑定 (binding = "DB")
-//  环境变量：PWD（删除密码）
+//  支持版本提取 (User-Agent)
+//  删除密码：env.PWD
 // ==========================
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, DELETE',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, User-Agent',
 };
 
 export default {
@@ -21,11 +20,19 @@ export default {
       return new Response(null, { headers: CORS_HEADERS });
     }
 
-    // ---------- 1. 提交 Bug ----------
+    // ---------- 1. 提交 Bug（提取版本） ----------
     if (path === '/submit' && method === 'POST') {
       try {
         const bugData = await request.json();
         const { source, time, type, content, traceback } = bugData;
+
+        // 从 User-Agent 提取版本号
+        const userAgent = request.headers.get('User-Agent') || '';
+        let version = '未知版本';
+        const match = userAgent.match(/Pvz-Game\/(\S+)/);
+        if (match) {
+          version = match[1];
+        }
 
         if (!type || !content) {
           return Response.json(
@@ -35,14 +42,15 @@ export default {
         }
 
         const result = await env.DB.prepare(
-          `INSERT INTO bugs (source, time, type, content, traceback)
-           VALUES (?, ?, ?, ?, ?) RETURNING id`
+          `INSERT INTO bugs (source, time, type, content, traceback, version)
+           VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
         ).bind(
           source || '未知线程',
           time || new Date().toLocaleString(),
           type,
           content,
-          traceback || ''
+          traceback || '',
+          version
         ).run();
 
         return Response.json(
@@ -50,6 +58,7 @@ export default {
             success: true,
             id: result.meta?.last_row_id || result.results?.[0]?.id,
             message: '🐞 Bug 报告已接收！',
+            version,
           },
           { headers: CORS_HEADERS }
         );
@@ -61,7 +70,7 @@ export default {
       }
     }
 
-    // ---------- 2. 查看面板（分页 + 筛选） ----------
+    // ---------- 2. 查看面板 ----------
     if (path === '/' && method === 'GET') {
       const params = new URLSearchParams(url.search);
       const page = parseInt(params.get('page')) || 1;
@@ -83,7 +92,7 @@ export default {
       const totalPages = Math.ceil(totalItems / limit);
 
       const dataSql = `
-        SELECT id, source, time, type, content, created_at
+        SELECT id, source, time, type, content, version, created_at
         FROM bugs ${whereClause}
         ORDER BY created_at DESC
         LIMIT ? OFFSET ?
@@ -144,7 +153,7 @@ export default {
         const correctPassword = env.PWD;
         if (!correctPassword) {
           return Response.json(
-            { success: false, error: '服务器未配置删除密码（PWD 环境变量）' },
+            { success: false, error: '服务器未配置删除密码（PWD 环境变量），请联系管理员' },
             { status: 500, headers: CORS_HEADERS }
           );
         }
@@ -205,11 +214,10 @@ export default {
   },
 };
 
-// ========== HTML 渲染函数（新增删除交互） ==========
+// ========== HTML 渲染函数（新增版本列） ==========
 function renderDashboard(bugs, pagination) {
   const { page, totalPages, totalItems, type, typeOptions } = pagination;
 
-  // 生成表格行（每行增加复选框）
   const rows = bugs
     .map(
       (b) => `
@@ -219,7 +227,8 @@ function renderDashboard(bugs, pagination) {
       <td style="font-size:13px; max-width:150px; word-break:break-all;">${b.source}</td>
       <td style="font-size:13px;">${b.time}</td>
       <td><span class="badge">${b.type}</span></td>
-      <td style="max-width:250px; word-break:break-all;">${b.content}</td>
+      <td style="max-width:200px; word-break:break-all;">${b.content}</td>
+      <td style="font-size:12px; color:#666;">${b.version || '未知'}</td>
       <td style="font-size:12px; color:#666;">${new Date(b.created_at).toLocaleString('zh-CN')}</td>
     </tr>
   `
@@ -276,7 +285,6 @@ function renderDashboard(bugs, pagination) {
     .footer-tip { margin-top: 15px; font-size: 13px; color: #94a3b8; text-align: center; }
     code { background: #e2e8f0; padding: 2px 8px; border-radius: 4px; font-size: 13px; }
 
-    /* 新增删除区域样式 */
     .delete-area {
       background: white;
       padding: 18px 24px;
@@ -341,14 +349,13 @@ function renderDashboard(bugs, pagination) {
       <table>
         <thead>
           <tr>
-            <th style="text-align:center; width:40px;">
-              <input type="checkbox" id="select-all" class="select-all">
-            </th>
+            <th style="text-align:center; width:40px;"><input type="checkbox" id="select-all" class="select-all"></th>
             <th>ID</th>
             <th>来源线程</th>
             <th>游戏时间</th>
             <th>类型</th>
             <th>内容</th>
+            <th>客户端版本</th>
             <th>接收时间</th>
           </tr>
         </thead>
@@ -358,7 +365,6 @@ function renderDashboard(bugs, pagination) {
     ${bugs.length > 0 ? paginationHtml : ''}
   </div>
 
-  <!-- 删除区域（仅当有数据时显示） -->
   ${bugs.length > 0 ? `
   <div class="delete-area">
     <span style="font-weight:500;">🗑️ 删除选中：</span>
@@ -370,13 +376,12 @@ function renderDashboard(bugs, pagination) {
   ` : ''}
 
   <div class="footer-tip">
-    💡 游戏客户端请 POST JSON 至 <code>/submit</code>  | 原始数据 API: <code>/api/bugs</code>  | 删除接口: <code>POST /delete</code>
+    💡 游戏客户端请 POST JSON 至 <code>/submit</code>，并在请求头携带 <code>User-Agent: Pvz-Game/版本号</code>
   </div>
 </div>
 
 <script>
   (function() {
-    // 全选逻辑
     const selectAll = document.getElementById('select-all');
     if (selectAll) {
       selectAll.addEventListener('change', function() {
@@ -384,7 +389,6 @@ function renderDashboard(bugs, pagination) {
       });
     }
 
-    // 删除按钮逻辑
     const deleteBtn = document.getElementById('delete-btn');
     if (deleteBtn) {
       deleteBtn.addEventListener('click', async function() {
@@ -406,7 +410,6 @@ function renderDashboard(bugs, pagination) {
           return;
         }
 
-        // 禁用按钮，显示加载状态
         deleteBtn.disabled = true;
         deleteBtn.textContent = '删除中...';
         statusMsg.textContent = '';
@@ -423,7 +426,6 @@ function renderDashboard(bugs, pagination) {
           if (result.success) {
             statusMsg.textContent = '✅ ' + result.message;
             statusMsg.className = 'status-msg';
-            // 刷新页面以显示最新数据
             setTimeout(() => location.reload(), 800);
           } else {
             statusMsg.textContent = '❌ ' + (result.error || '删除失败');
