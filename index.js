@@ -1,6 +1,8 @@
 // ==========================
 //  Cloudflare Worker 后端
-//  版本提取 + 删除 + 详情弹窗
+//  版本提取 + 删除（含日志） + 详情弹窗
+//  依赖 D1 绑定 (binding = "DB")
+//  环境变量：PWD（删除密码）
 // ==========================
 
 const CORS_HEADERS = {
@@ -59,6 +61,7 @@ export default {
           { headers: CORS_HEADERS }
         );
       } catch (e) {
+        console.error('[提交] 异常:', e.stack);
         return Response.json(
           { success: false, error: e.message },
           { status: 500, headers: CORS_HEADERS }
@@ -87,7 +90,6 @@ export default {
       const totalItems = countResult?.total || 0;
       const totalPages = Math.ceil(totalItems / limit);
 
-      // 【改动】增加 traceback 字段
       const dataSql = `
         SELECT id, source, time, type, content, traceback, version, created_at
         FROM bugs ${whereClause}
@@ -141,20 +143,29 @@ export default {
       );
     }
 
-    // ---------- 4. 删除 Bug ----------
+    // ---------- 4. 删除 Bug（含详细日志） ----------
     if (path === '/delete' && method === 'POST') {
       try {
+        console.log('[删除] 读取 PWD 环境变量:', env.PWD ? '已设置 (长度=' + env.PWD.length + ')' : '未定义');
+
         const body = await request.json();
         const { password, ids, id } = body;
 
         const correctPassword = env.PWD;
         if (!correctPassword) {
+          console.error('[删除] 错误: 环境变量 PWD 未配置');
           return Response.json(
-            { success: false, error: '服务器未配置删除密码（PWD 环境变量），请联系管理员' },
+            {
+              success: false,
+              error: '❌ 服务器未配置删除密码（PWD 环境变量），请联系管理员',
+              debug: 'env.PWD is undefined'
+            },
             { status: 500, headers: CORS_HEADERS }
           );
         }
+
         if (password !== correctPassword) {
+          console.warn('[删除] 密码错误: 输入密码长度=' + password.length + ', 正确密码长度=' + correctPassword.length);
           return Response.json(
             { success: false, error: '密码错误' },
             { status: 401, headers: CORS_HEADERS }
@@ -180,6 +191,8 @@ export default {
           );
         }
 
+        console.log('[删除] 准备删除 IDs:', deleteIds);
+
         const placeholders = deleteIds.map(() => '?').join(',');
         const sql = `DELETE FROM bugs WHERE id IN (${placeholders})`;
         const result = await env.DB.prepare(sql)
@@ -187,6 +200,7 @@ export default {
           .run();
 
         const deletedCount = result.meta?.rows_written || result.results?.length || 0;
+        console.log('[删除] 成功删除记录数:', deletedCount);
 
         return Response.json(
           {
@@ -197,7 +211,7 @@ export default {
           { headers: CORS_HEADERS }
         );
       } catch (e) {
-        console.error('删除异常:', e.stack);
+        console.error('[删除] 异常堆栈:', e.stack);
         return Response.json(
           { success: false, error: e.message, stack: e.stack },
           { status: 500, headers: CORS_HEADERS }
@@ -216,7 +230,6 @@ export default {
 function renderDashboard(bugs, pagination) {
   const { page, totalPages, totalItems, type, typeOptions } = pagination;
 
-  // 将数据转为 JSON 字符串，方便在 JS 中按 ID 查找
   const bugsJson = JSON.stringify(bugs);
 
   const rows = bugs
@@ -455,10 +468,8 @@ function renderDashboard(bugs, pagination) {
 </div>
 
 <script>
-  // 将后端数据注入全局变量，供详情按钮使用
   const bugsData = ${bugsJson};
 
-  // 打开详情模态框
   function openDetail(id) {
     const bug = bugsData.find(b => b.id === id);
     if (!bug) return;
@@ -477,16 +488,13 @@ function renderDashboard(bugs, pagination) {
     document.getElementById('detailModal').classList.add('active');
   }
 
-  // 关闭模态框
   document.getElementById('modalClose').addEventListener('click', function() {
     document.getElementById('detailModal').classList.remove('active');
   });
-  // 点击外部关闭
   document.getElementById('detailModal').addEventListener('click', function(e) {
     if (e.target === this) this.classList.remove('active');
   });
 
-  // 绑定所有详情按钮
   document.querySelectorAll('.detail-btn').forEach(btn => {
     btn.addEventListener('click', function() {
       const id = parseInt(this.dataset.id);
@@ -494,7 +502,6 @@ function renderDashboard(bugs, pagination) {
     });
   });
 
-  // 全选逻辑（保持不变）
   const selectAll = document.getElementById('select-all');
   if (selectAll) {
     selectAll.addEventListener('change', function() {
@@ -502,7 +509,6 @@ function renderDashboard(bugs, pagination) {
     });
   }
 
-  // 删除按钮（保持不变）
   const deleteBtn = document.getElementById('delete-btn');
   if (deleteBtn) {
     deleteBtn.addEventListener('click', async function() {
