@@ -17,7 +17,6 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
-    // 处理预检请求
     if (method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
@@ -77,14 +76,12 @@ export default {
         bindParams.push(typeFilter);
       }
 
-      // 总条数
       const countResult = await env.DB.prepare(
         `SELECT COUNT(*) as total FROM bugs ${whereClause}`
       ).bind(...bindParams).first();
       const totalItems = countResult?.total || 0;
       const totalPages = Math.ceil(totalItems / limit);
 
-      // 分页数据
       const dataSql = `
         SELECT id, source, time, type, content, created_at
         FROM bugs ${whereClause}
@@ -95,7 +92,6 @@ export default {
         .bind(...bindParams, limit, offset)
         .all();
 
-      // 所有类型（用于筛选下拉）
       const typeList = await env.DB.prepare(
         'SELECT DISTINCT type FROM bugs ORDER BY type'
       ).all();
@@ -115,7 +111,7 @@ export default {
       });
     }
 
-    // ---------- 3. JSON API（获取列表） ----------
+    // ---------- 3. JSON API ----------
     if (path === '/api/bugs' && method === 'GET') {
       const params = new URLSearchParams(url.search);
       const page = parseInt(params.get('page')) || 1;
@@ -139,13 +135,12 @@ export default {
       );
     }
 
-    // ---------- 4. 删除 Bug（新增） ----------
+    // ---------- 4. 删除 Bug ----------
     if (path === '/delete' && method === 'POST') {
       try {
         const body = await request.json();
         const { password, ids, id } = body;
 
-        // 验证密码
         const correctPassword = env.PWD;
         if (!correctPassword) {
           return Response.json(
@@ -160,7 +155,6 @@ export default {
           );
         }
 
-        // 统一成数组
         let deleteIds = [];
         if (ids && Array.isArray(ids)) {
           deleteIds = ids;
@@ -180,10 +174,8 @@ export default {
           );
         }
 
-        // 构建 IN 语句的安全占位符
         const placeholders = deleteIds.map(() => '?').join(',');
         const sql = `DELETE FROM bugs WHERE id IN (${placeholders})`;
-
         const result = await env.DB.prepare(sql)
           .bind(...deleteIds)
           .run();
@@ -213,14 +205,16 @@ export default {
   },
 };
 
-// ========== HTML 渲染函数（不变） ==========
+// ========== HTML 渲染函数（新增删除交互） ==========
 function renderDashboard(bugs, pagination) {
   const { page, totalPages, totalItems, type, typeOptions } = pagination;
 
+  // 生成表格行（每行增加复选框）
   const rows = bugs
     .map(
       (b) => `
     <tr>
+      <td style="text-align:center;"><input type="checkbox" class="bug-checkbox" value="${b.id}"></td>
       <td><strong>#${b.id}</strong></td>
       <td style="font-size:13px; max-width:150px; word-break:break-all;">${b.source}</td>
       <td style="font-size:13px;">${b.time}</td>
@@ -281,6 +275,41 @@ function renderDashboard(bugs, pagination) {
     .pagination a:hover:not(.disabled) { background: #e2e8f0; }
     .footer-tip { margin-top: 15px; font-size: 13px; color: #94a3b8; text-align: center; }
     code { background: #e2e8f0; padding: 2px 8px; border-radius: 4px; font-size: 13px; }
+
+    /* 新增删除区域样式 */
+    .delete-area {
+      background: white;
+      padding: 18px 24px;
+      border-radius: 16px;
+      margin-top: 20px;
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      flex-wrap: wrap;
+      border: 1px solid #e2e8f0;
+    }
+    .delete-area input[type="password"] {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid #cbd5e1;
+      font-size: 14px;
+      width: 200px;
+    }
+    .delete-area .btn-delete {
+      background: #e11d48;
+      color: white;
+      border: none;
+      padding: 8px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .delete-area .btn-delete:hover { background: #be123c; }
+    .delete-area .btn-delete:disabled { opacity: 0.6; cursor: not-allowed; }
+    .delete-area .status-msg { font-size: 14px; color: #16a34a; }
+    .delete-area .status-msg.error { color: #dc2626; }
+    .select-all { margin-right: 5px; }
   </style>
 </head>
 <body>
@@ -310,17 +339,108 @@ function renderDashboard(bugs, pagination) {
       </div>
     ` : `
       <table>
-        <thead><tr><th>ID</th><th>来源线程</th><th>游戏时间</th><th>类型</th><th>内容</th><th>接收时间</th></tr></thead>
+        <thead>
+          <tr>
+            <th style="text-align:center; width:40px;">
+              <input type="checkbox" id="select-all" class="select-all">
+            </th>
+            <th>ID</th>
+            <th>来源线程</th>
+            <th>游戏时间</th>
+            <th>类型</th>
+            <th>内容</th>
+            <th>接收时间</th>
+          </tr>
+        </thead>
         <tbody>${rows}</tbody>
       </table>
     `}
     ${bugs.length > 0 ? paginationHtml : ''}
   </div>
 
+  <!-- 删除区域（仅当有数据时显示） -->
+  ${bugs.length > 0 ? `
+  <div class="delete-area">
+    <span style="font-weight:500;">🗑️ 删除选中：</span>
+    <input type="password" id="delete-password" placeholder="请输入删除密码" />
+    <button class="btn-delete" id="delete-btn">删除选中</button>
+    <span id="delete-status" class="status-msg"></span>
+    <span style="color:#94a3b8; font-size:13px;">(密码在环境变量 PWD 中设置)</span>
+  </div>
+  ` : ''}
+
   <div class="footer-tip">
-    💡 游戏客户端请 POST JSON 至 <code>/submit</code>  | 原始数据 API: <code>/api/bugs</code>  | 删除接口: <code>POST /delete</code>（需密码）
+    💡 游戏客户端请 POST JSON 至 <code>/submit</code>  | 原始数据 API: <code>/api/bugs</code>  | 删除接口: <code>POST /delete</code>
   </div>
 </div>
+
+<script>
+  (function() {
+    // 全选逻辑
+    const selectAll = document.getElementById('select-all');
+    if (selectAll) {
+      selectAll.addEventListener('change', function() {
+        document.querySelectorAll('.bug-checkbox').forEach(cb => cb.checked = this.checked);
+      });
+    }
+
+    // 删除按钮逻辑
+    const deleteBtn = document.getElementById('delete-btn');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', async function() {
+        const passwordInput = document.getElementById('delete-password');
+        const statusMsg = document.getElementById('delete-status');
+        const checkedBoxes = document.querySelectorAll('.bug-checkbox:checked');
+        const ids = Array.from(checkedBoxes).map(cb => parseInt(cb.value));
+
+        if (ids.length === 0) {
+          statusMsg.textContent = '⚠️ 请至少勾选一条记录';
+          statusMsg.className = 'status-msg error';
+          return;
+        }
+
+        const password = passwordInput.value.trim();
+        if (!password) {
+          statusMsg.textContent = '⚠️ 请输入删除密码';
+          statusMsg.className = 'status-msg error';
+          return;
+        }
+
+        // 禁用按钮，显示加载状态
+        deleteBtn.disabled = true;
+        deleteBtn.textContent = '删除中...';
+        statusMsg.textContent = '';
+        statusMsg.className = 'status-msg';
+
+        try {
+          const response = await fetch('/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password, ids })
+          });
+          const result = await response.json();
+
+          if (result.success) {
+            statusMsg.textContent = '✅ ' + result.message;
+            statusMsg.className = 'status-msg';
+            // 刷新页面以显示最新数据
+            setTimeout(() => location.reload(), 800);
+          } else {
+            statusMsg.textContent = '❌ ' + (result.error || '删除失败');
+            statusMsg.className = 'status-msg error';
+            deleteBtn.disabled = false;
+            deleteBtn.textContent = '删除选中';
+          }
+        } catch (err) {
+          statusMsg.textContent = '❌ 网络错误：' + err.message;
+          statusMsg.className = 'status-msg error';
+          deleteBtn.disabled = false;
+          deleteBtn.textContent = '删除选中';
+        }
+      });
+    }
+  })();
+</script>
 </body>
 </html>`;
 }
