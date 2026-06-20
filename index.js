@@ -226,12 +226,13 @@ export default {
   },
 };
 
-// ========== HTML 渲染函数（含详情模态框） ==========
+// ========== HTML 渲染函数（内容列显示“📄 详情”按钮） ==========
 function renderDashboard(bugs, pagination) {
   const { page, totalPages, totalItems, type, typeOptions } = pagination;
 
   const bugsJson = JSON.stringify(bugs);
 
+  // 表格行：内容列改为“📄 详情”按钮，移除操作列
   const rows = bugs
     .map(
       (b) => `
@@ -241,10 +242,9 @@ function renderDashboard(bugs, pagination) {
       <td style="font-size:13px; max-width:150px; word-break:break-all;">${b.source}</td>
       <td style="font-size:13px;">${b.time}</td>
       <td><span class="badge">${b.type}</span></td>
-      <td style="max-width:200px; word-break:break-all;">${b.content}</td>
+      <td><button class="detail-btn" data-id="${b.id}">📄 详情</button></td>
       <td style="font-size:12px; color:#666;">${b.version || '未知'}</td>
       <td style="font-size:12px; color:#666;">${new Date(b.created_at).toLocaleString('zh-CN')}</td>
-      <td><button class="detail-btn" data-id="${b.id}">📄 详情</button></td>
     </tr>
   `
     )
@@ -334,6 +334,7 @@ function renderDashboard(bugs, pagination) {
     .delete-area .status-msg.error { color: #dc2626; }
     .select-all { margin-right: 5px; }
 
+    /* 详情按钮（表格内） */
     .detail-btn {
       background: #0f172a;
       color: white;
@@ -431,10 +432,9 @@ function renderDashboard(bugs, pagination) {
             <th>来源线程</th>
             <th>游戏时间</th>
             <th>类型</th>
-            <th>内容</th>
+            <th>详情</th>   <!-- 内容列改为“详情” -->
             <th>客户端版本</th>
             <th>接收时间</th>
-            <th>操作</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -449,13 +449,8 @@ function renderDashboard(bugs, pagination) {
     <input type="password" id="delete-password" placeholder="请输入删除密码" />
     <button class="btn-delete" id="delete-btn">删除选中</button>
     <span id="delete-status" class="status-msg"></span>
-    <span style="color:#94a3b8; font-size:13px;">(密码在环境变量 PWD 中设置)</span>
   </div>
   ` : ''}
-
-  <div class="footer-tip">
-    💡 游戏客户端请 POST JSON 至 <code>/submit</code>，并在请求头携带 <code>User-Agent: Pvz-Game/版本号</code>
-  </div>
 </div>
 
 <!-- 详情模态框 -->
@@ -495,6 +490,7 @@ function renderDashboard(bugs, pagination) {
     if (e.target === this) this.classList.remove('active');
   });
 
+  // 绑定所有详情按钮（包括内容列和可能保留的详情按钮，但这里只有内容列有）
   document.querySelectorAll('.detail-btn').forEach(btn => {
     btn.addEventListener('click', function() {
       const id = parseInt(this.dataset.id);
