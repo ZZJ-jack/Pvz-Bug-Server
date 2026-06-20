@@ -1,7 +1,6 @@
 // ==========================
 //  Cloudflare Worker 后端
-//  支持版本提取 (User-Agent)
-//  删除密码：env.PWD
+//  版本提取 + 删除 + 详情弹窗
 // ==========================
 
 const CORS_HEADERS = {
@@ -20,19 +19,16 @@ export default {
       return new Response(null, { headers: CORS_HEADERS });
     }
 
-    // ---------- 1. 提交 Bug（提取版本） ----------
+    // ---------- 1. 提交 Bug ----------
     if (path === '/submit' && method === 'POST') {
       try {
         const bugData = await request.json();
         const { source, time, type, content, traceback } = bugData;
 
-        // 从 User-Agent 提取版本号
         const userAgent = request.headers.get('User-Agent') || '';
         let version = '未知版本';
         const match = userAgent.match(/Pvz-Game\/(\S+)/);
-        if (match) {
-          version = match[1];
-        }
+        if (match) version = match[1];
 
         if (!type || !content) {
           return Response.json(
@@ -91,8 +87,9 @@ export default {
       const totalItems = countResult?.total || 0;
       const totalPages = Math.ceil(totalItems / limit);
 
+      // 【改动】增加 traceback 字段
       const dataSql = `
-        SELECT id, source, time, type, content, version, created_at
+        SELECT id, source, time, type, content, traceback, version, created_at
         FROM bugs ${whereClause}
         ORDER BY created_at DESC
         LIMIT ? OFFSET ?
@@ -200,8 +197,9 @@ export default {
           { headers: CORS_HEADERS }
         );
       } catch (e) {
+        console.error('删除异常:', e.stack);
         return Response.json(
-          { success: false, error: e.message },
+          { success: false, error: e.message, stack: e.stack },
           { status: 500, headers: CORS_HEADERS }
         );
       }
@@ -214,9 +212,12 @@ export default {
   },
 };
 
-// ========== HTML 渲染函数（新增版本列） ==========
+// ========== HTML 渲染函数（含详情模态框） ==========
 function renderDashboard(bugs, pagination) {
   const { page, totalPages, totalItems, type, typeOptions } = pagination;
+
+  // 将数据转为 JSON 字符串，方便在 JS 中按 ID 查找
+  const bugsJson = JSON.stringify(bugs);
 
   const rows = bugs
     .map(
@@ -230,6 +231,7 @@ function renderDashboard(bugs, pagination) {
       <td style="max-width:200px; word-break:break-all;">${b.content}</td>
       <td style="font-size:12px; color:#666;">${b.version || '未知'}</td>
       <td style="font-size:12px; color:#666;">${new Date(b.created_at).toLocaleString('zh-CN')}</td>
+      <td><button class="detail-btn" data-id="${b.id}">📄 详情</button></td>
     </tr>
   `
     )
@@ -318,6 +320,68 @@ function renderDashboard(bugs, pagination) {
     .delete-area .status-msg { font-size: 14px; color: #16a34a; }
     .delete-area .status-msg.error { color: #dc2626; }
     .select-all { margin-right: 5px; }
+
+    .detail-btn {
+      background: #0f172a;
+      color: white;
+      border: none;
+      padding: 4px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .detail-btn:hover { background: #1e293b; }
+
+    /* 模态框 */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.5);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-box {
+      background: white;
+      max-width: 800px;
+      width: 90%;
+      max-height: 80vh;
+      padding: 30px;
+      border-radius: 16px;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      position: relative;
+    }
+    .modal-close {
+      position: sticky;
+      top: 0;
+      float: right;
+      background: none;
+      border: none;
+      font-size: 28px;
+      cursor: pointer;
+      color: #94a3b8;
+    }
+    .modal-close:hover { color: #0f172a; }
+    .modal-title { font-size: 22px; font-weight: 700; margin-bottom: 20px; }
+    .modal-field { margin-bottom: 15px; }
+    .modal-field strong { display: inline-block; min-width: 80px; color: #475569; }
+    .modal-field .value { word-break: break-all; }
+    .modal-field .traceback {
+      background: #f1f5f9;
+      padding: 12px;
+      border-radius: 8px;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 300px;
+      overflow-y: auto;
+      margin-top: 4px;
+    }
   </style>
 </head>
 <body>
@@ -357,6 +421,7 @@ function renderDashboard(bugs, pagination) {
             <th>内容</th>
             <th>客户端版本</th>
             <th>接收时间</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -380,68 +445,116 @@ function renderDashboard(bugs, pagination) {
   </div>
 </div>
 
+<!-- 详情模态框 -->
+<div class="modal-overlay" id="detailModal">
+  <div class="modal-box">
+    <button class="modal-close" id="modalClose">&times;</button>
+    <div class="modal-title">📄 Bug 详细信息</div>
+    <div id="modalContent"></div>
+  </div>
+</div>
+
 <script>
-  (function() {
-    const selectAll = document.getElementById('select-all');
-    if (selectAll) {
-      selectAll.addEventListener('change', function() {
-        document.querySelectorAll('.bug-checkbox').forEach(cb => cb.checked = this.checked);
-      });
-    }
+  // 将后端数据注入全局变量，供详情按钮使用
+  const bugsData = ${bugsJson};
 
-    const deleteBtn = document.getElementById('delete-btn');
-    if (deleteBtn) {
-      deleteBtn.addEventListener('click', async function() {
-        const passwordInput = document.getElementById('delete-password');
-        const statusMsg = document.getElementById('delete-status');
-        const checkedBoxes = document.querySelectorAll('.bug-checkbox:checked');
-        const ids = Array.from(checkedBoxes).map(cb => parseInt(cb.value));
+  // 打开详情模态框
+  function openDetail(id) {
+    const bug = bugsData.find(b => b.id === id);
+    if (!bug) return;
 
-        if (ids.length === 0) {
-          statusMsg.textContent = '⚠️ 请至少勾选一条记录';
-          statusMsg.className = 'status-msg error';
-          return;
-        }
+    const content = document.getElementById('modalContent');
+    content.innerHTML = \`
+      <div class="modal-field"><strong>ID：</strong><span class="value">\${bug.id}</span></div>
+      <div class="modal-field"><strong>来源：</strong><span class="value">\${bug.source || '未知'}</span></div>
+      <div class="modal-field"><strong>游戏时间：</strong><span class="value">\${bug.time}</span></div>
+      <div class="modal-field"><strong>类型：</strong><span class="value">\${bug.type}</span></div>
+      <div class="modal-field"><strong>版本：</strong><span class="value">\${bug.version || '未知'}</span></div>
+      <div class="modal-field"><strong>接收时间：</strong><span class="value">\${new Date(bug.created_at).toLocaleString('zh-CN')}</span></div>
+      <div class="modal-field"><strong>错误内容：</strong><div class="value" style="background:#f8fafc;padding:8px;border-radius:6px;white-space:pre-wrap;word-break:break-all;">\${bug.content}</div></div>
+      <div class="modal-field"><strong>完整堆栈：</strong><div class="traceback">\${bug.traceback || '无堆栈信息'}</div></div>
+    \`;
+    document.getElementById('detailModal').classList.add('active');
+  }
 
-        const password = passwordInput.value.trim();
-        if (!password) {
-          statusMsg.textContent = '⚠️ 请输入删除密码';
-          statusMsg.className = 'status-msg error';
-          return;
-        }
+  // 关闭模态框
+  document.getElementById('modalClose').addEventListener('click', function() {
+    document.getElementById('detailModal').classList.remove('active');
+  });
+  // 点击外部关闭
+  document.getElementById('detailModal').addEventListener('click', function(e) {
+    if (e.target === this) this.classList.remove('active');
+  });
 
-        deleteBtn.disabled = true;
-        deleteBtn.textContent = '删除中...';
-        statusMsg.textContent = '';
-        statusMsg.className = 'status-msg';
+  // 绑定所有详情按钮
+  document.querySelectorAll('.detail-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+      const id = parseInt(this.dataset.id);
+      openDetail(id);
+    });
+  });
 
-        try {
-          const response = await fetch('/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password, ids })
-          });
-          const result = await response.json();
+  // 全选逻辑（保持不变）
+  const selectAll = document.getElementById('select-all');
+  if (selectAll) {
+    selectAll.addEventListener('change', function() {
+      document.querySelectorAll('.bug-checkbox').forEach(cb => cb.checked = this.checked);
+    });
+  }
 
-          if (result.success) {
-            statusMsg.textContent = '✅ ' + result.message;
-            statusMsg.className = 'status-msg';
-            setTimeout(() => location.reload(), 800);
-          } else {
-            statusMsg.textContent = '❌ ' + (result.error || '删除失败');
-            statusMsg.className = 'status-msg error';
-            deleteBtn.disabled = false;
-            deleteBtn.textContent = '删除选中';
-          }
-        } catch (err) {
-          statusMsg.textContent = '❌ 网络错误：' + err.message;
+  // 删除按钮（保持不变）
+  const deleteBtn = document.getElementById('delete-btn');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', async function() {
+      const passwordInput = document.getElementById('delete-password');
+      const statusMsg = document.getElementById('delete-status');
+      const checkedBoxes = document.querySelectorAll('.bug-checkbox:checked');
+      const ids = Array.from(checkedBoxes).map(cb => parseInt(cb.value));
+
+      if (ids.length === 0) {
+        statusMsg.textContent = '⚠️ 请至少勾选一条记录';
+        statusMsg.className = 'status-msg error';
+        return;
+      }
+
+      const password = passwordInput.value.trim();
+      if (!password) {
+        statusMsg.textContent = '⚠️ 请输入删除密码';
+        statusMsg.className = 'status-msg error';
+        return;
+      }
+
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = '删除中...';
+      statusMsg.textContent = '';
+      statusMsg.className = 'status-msg';
+
+      try {
+        const response = await fetch('/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password, ids })
+        });
+        const result = await response.json();
+
+        if (result.success) {
+          statusMsg.textContent = '✅ ' + result.message;
+          statusMsg.className = 'status-msg';
+          setTimeout(() => location.reload(), 800);
+        } else {
+          statusMsg.textContent = '❌ ' + (result.error || '删除失败');
           statusMsg.className = 'status-msg error';
           deleteBtn.disabled = false;
           deleteBtn.textContent = '删除选中';
         }
-      });
-    }
-  })();
+      } catch (err) {
+        statusMsg.textContent = '❌ 网络错误：' + err.message;
+        statusMsg.className = 'status-msg error';
+        deleteBtn.disabled = false;
+        deleteBtn.textContent = '删除选中';
+      }
+    });
+  }
 </script>
 </body>
 </html>`;
