@@ -1,0 +1,8 @@
+name = "bug-tracker-backend"
+main = "index.js"
+compatibility_date = "2026-06-20"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pz-bug-db"
+database_id = "98a012bc-9207-4ac1-a0f4-43eb7e1be8c2"  # 就是这个！
