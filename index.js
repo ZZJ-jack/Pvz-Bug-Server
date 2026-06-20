@@ -1,12 +1,13 @@
 // ==========================
 //  Cloudflare Worker 后端
-//  接收 Bug 报告，提供可视化面板
+//  接收 Bug 报告，提供可视化面板，支持删除（密码验证）
 //  依赖 D1 数据库绑定 (binding = "DB")
+//  环境变量：PWD（删除密码）
 // ==========================
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, DELETE',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
@@ -114,7 +115,7 @@ export default {
       });
     }
 
-    // ---------- 3. JSON API（可选） ----------
+    // ---------- 3. JSON API（获取列表） ----------
     if (path === '/api/bugs' && method === 'GET') {
       const params = new URLSearchParams(url.search);
       const page = parseInt(params.get('page')) || 1;
@@ -138,6 +139,73 @@ export default {
       );
     }
 
+    // ---------- 4. 删除 Bug（新增） ----------
+    if (path === '/delete' && method === 'POST') {
+      try {
+        const body = await request.json();
+        const { password, ids, id } = body;
+
+        // 验证密码
+        const correctPassword = env.PWD;
+        if (!correctPassword) {
+          return Response.json(
+            { success: false, error: '服务器未配置删除密码（PWD 环境变量）' },
+            { status: 500, headers: CORS_HEADERS }
+          );
+        }
+        if (password !== correctPassword) {
+          return Response.json(
+            { success: false, error: '密码错误' },
+            { status: 401, headers: CORS_HEADERS }
+          );
+        }
+
+        // 统一成数组
+        let deleteIds = [];
+        if (ids && Array.isArray(ids)) {
+          deleteIds = ids;
+        } else if (id !== undefined) {
+          deleteIds = [id];
+        } else {
+          return Response.json(
+            { success: false, error: '请提供 id 或 ids 数组' },
+            { status: 400, headers: CORS_HEADERS }
+          );
+        }
+
+        if (deleteIds.length === 0) {
+          return Response.json(
+            { success: false, error: '删除 ID 列表不能为空' },
+            { status: 400, headers: CORS_HEADERS }
+          );
+        }
+
+        // 构建 IN 语句的安全占位符
+        const placeholders = deleteIds.map(() => '?').join(',');
+        const sql = `DELETE FROM bugs WHERE id IN (${placeholders})`;
+
+        const result = await env.DB.prepare(sql)
+          .bind(...deleteIds)
+          .run();
+
+        const deletedCount = result.meta?.rows_written || result.results?.length || 0;
+
+        return Response.json(
+          {
+            success: true,
+            deletedCount,
+            message: `成功删除 ${deletedCount} 条记录`,
+          },
+          { headers: CORS_HEADERS }
+        );
+      } catch (e) {
+        return Response.json(
+          { success: false, error: e.message },
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+
     return new Response('❌ 404 - 接口不存在。请访问 / 查看面板，或 POST 到 /submit', {
       status: 404,
       headers: CORS_HEADERS,
@@ -145,7 +213,7 @@ export default {
   },
 };
 
-// ========== HTML 渲染函数 ==========
+// ========== HTML 渲染函数（不变） ==========
 function renderDashboard(bugs, pagination) {
   const { page, totalPages, totalItems, type, typeOptions } = pagination;
 
@@ -250,7 +318,7 @@ function renderDashboard(bugs, pagination) {
   </div>
 
   <div class="footer-tip">
-    💡 游戏客户端请 POST JSON 至 <code>/submit</code>  | 原始数据 API: <code>/api/bugs</code>
+    💡 游戏客户端请 POST JSON 至 <code>/submit</code>  | 原始数据 API: <code>/api/bugs</code>  | 删除接口: <code>POST /delete</code>（需密码）
   </div>
 </div>
 </body>
